@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Fizan's Zippy Encryptor – AES-GCM with Progress</title>
+<style>
+  :root { --bg:#0f172a; --card:#111827; --muted:#9aa3b2; --txt:#e5e7eb; --acc:#22c55e; --warn:#ef4444; }
+  body{margin:0;background:linear-gradient(135deg,#0b1224,#0f172a);font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial;color:var(--txt)}
+  .wrap{max-width:780px;margin:48px auto;padding:24px}
+  .card{background:rgba(17,24,39,.85);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:24px;box-shadow:0 8px 40px rgba(0,0,0,.25)}
+  h1{margin:0 0 12px;font-weight:700;letter-spacing:.2px}
+  p.sub{margin:0 0 18px;color:var(--muted)}
+  .row{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}
+  .seg{display:flex;gap:10px;align-items:center;background:#0b1328;border:1px solid rgba(255,255,255,.06);padding:8px;border-radius:12px}
+  .seg button{appearance:none;border:0;background:transparent;color:var(--txt);padding:10px 14px;border-radius:10px;cursor:pointer}
+  .seg button.active{background:#18233f}
+  label{display:block;margin:10px 0 6px;color:#cdd5e1}
+  input[type="file"],input[type="password"]{width:100%;padding:12px 14px;background:#0b1328;border:1px solid rgba(255,255,255,.08);border-radius:10px;color:var(--txt)}
+  .hint{font-size:.9em;color:var(--muted);margin-top:6px}
+  .drop{border:1.5px dashed rgba(255,255,255,.25);border-radius:12px;padding:18px;text-align:center;color:#cbd5e1}
+  .drop.drag{border-color:var(--acc);color:#86efac;background:rgba(34,197,94,.06)}
+  .btn{margin-top:14px;background:var(--acc);color:#06280f;border:0;border-radius:12px;padding:12px 16px;font-weight:650;cursor:pointer}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .small{font-size:.85em;color:var(--muted)}
+  .err{color:#fecaca}
+  .ok{color:#86efac}
+  code{background:#0b1328;border:1px solid rgba(255,255,255,.08);padding:2px 6px;border-radius:6px}
+  progress {width: 100%; height: 16px; margin-top: 8px;}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Fizan's Zippy Encryptor</h1>
+      <p class="sub">Offline AES-GCM encryption/decryption with progress bar. Files never leave your Mac.</p>
+
+      <div class="row">
+        <div class="seg" role="tablist" aria-label="Mode">
+          <button id="modeEnc" class="active" aria-pressed="true">Encrypt</button>
+          <button id="modeDec" aria-pressed="false">Decrypt</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div id="drop" class="drop">Drop a file here or use the picker below</div>
+        <input id="file" type="file" />
+      </div>
+
+      <div class="row">
+        <div style="flex:1">
+          <label for="pw">Password</label>
+          <input id="pw" type="password" autocomplete="new-password" placeholder="Enter a strong password" />
+          <div class="hint">PBKDF2-SHA-256 (200k rounds) → AES-256-GCM</div>
+        </div>
+        <div style="flex:1" id="pw2wrap">
+          <label for="pw2">Confirm password</label>
+          <input id="pw2" type="password" autocomplete="new-password" placeholder="Re-enter password" />
+        </div>
+      </div>
+
+      <button id="go" class="btn" disabled>Go</button>
+      <progress id="progress" value="0" max="100" style="display:none;"></progress>
+      <p id="status" class="small"></p>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const ui = {
+    modeEnc: document.getElementById('modeEnc'),
+    modeDec: document.getElementById('modeDec'),
+    drop: document.getElementById('drop'),
+    file: document.getElementById('file'),
+    pw: document.getElementById('pw'),
+    pw2: document.getElementById('pw2'),
+    pw2wrap: document.getElementById('pw2wrap'),
+    go: document.getElementById('go'),
+    status: document.getElementById('status'),
+    progress: document.getElementById('progress'),
+  };
+
+  let mode = 'enc';
+  const MAGIC = new TextEncoder().encode('ZE-AES');
+  const VERSION = 1;
+
+  function setMode(m) {
+    mode = m;
+    ui.modeEnc.classList.toggle('active', m==='enc');
+    ui.modeDec.classList.toggle('active', m==='dec');
+    ui.pw2wrap.style.display = (m==='dec') ? 'none' : '';
+    ui.status.textContent = '';
+    validate();
+  }
+
+  ui.modeEnc.onclick = () => setMode('enc');
+  ui.modeDec.onclick = () => setMode('dec');
+
+  ['dragenter','dragover'].forEach(evt =>
+    ui.drop.addEventListener(evt, e => { e.preventDefault(); ui.drop.classList.add('drag'); })
+  );
+  ['dragleave','drop'].forEach(evt =>
+    ui.drop.addEventListener(evt, e => { e.preventDefault(); ui.drop.classList.remove('drag'); })
+  );
+  ui.drop.addEventListener('drop', e => {
+    if (e.dataTransfer.files[0]) {
+      ui.file.files = e.dataTransfer.files;
+      validate();
+    }
+  });
+
+  [ui.file, ui.pw, ui.pw2].forEach(el => el.addEventListener('input', validate));
+
+  function validate() {
+    const f = ui.file.files[0];
+    const pw = ui.pw.value;
+    const okPw = (mode==='dec') ? pw.length>=1 : (pw.length>=8 && pw===ui.pw2.value);
+    ui.go.disabled = !(f && okPw);
+  }
+
+  async function deriveKey(password, salt) {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw', enc.encode(password), {name:'PBKDF2'}, false, ['deriveKey']
+    );
+    return crypto.subtle.deriveKey(
+      {name:'PBKDF2', hash:'SHA-256', salt, iterations:200000},
+      keyMaterial,
+      {name:'AES-GCM', length:256},
+      false,
+      ['encrypt','decrypt']
+    );
+  }
+
+  async function encryptFile(file, password) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(password, salt);
+    const fileBuf = new Uint8Array(await file.arrayBuffer());
+
+    // Progress simulation
+    ui.progress.style.display = 'block';
+    ui.progress.value = 0;
+    const chunkSize = 1024 * 1024;
+    for (let offset = 0; offset < fileBuf.length; offset += chunkSize) {
+      ui.progress.value = Math.round((offset / fileBuf.length) * 100);
+      await new Promise(r => setTimeout(r, 5)); // yield
+    }
+
+    const ct = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, fileBuf));
+    const headerLen = MAGIC.length + 1 + 16 + 12;
+    const out = new Uint8Array(headerLen + ct.length);
+    let off = 0;
+    out.set(MAGIC, off); off += MAGIC.length;
+    out[off++] = VERSION & 0xff;
+    out.set(salt, off); off += 16;
+    out.set(iv, off); off += 12;
+    out.set(ct, off);
+
+    ui.progress.value = 100;
+    return { blob: new Blob([out]), suggestedName: file.name + '.enc' };
+  }
+
+  async function decryptFile(file, password) {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const salt = buf.slice(7, 23);
+    const iv = buf.slice(23, 35);
+    const ct = buf.slice(35);
+    const key = await deriveKey(password, salt);
+
+    ui.progress.style.display = 'block';
+    ui.progress.value = 0;
+    const chunkSize = 1024 * 1024;
+    for (let offset = 0; offset < ct.length; offset += chunkSize) {
+      ui.progress.value = Math.round((offset / ct.length) * 100);
+      await new Promise(r => setTimeout(r, 5));
+    }
+
+    const pt = new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM', iv}, key, ct));
+    ui.progress.value = 100;
+    return { blob: new Blob([pt]), suggestedName: file.name.replace(/\.enc$/i,'') };
+  }
+
+  ui.go.onclick = async () => {
+    try {
+      ui.go.disabled = true;
+      const file = ui.file.files[0];
+      ui.status.textContent = mode==='enc' ? 'Encrypting…' : 'Decrypting…';
+      const out = (mode==='enc') ? await encryptFile(file, ui.pw.value) : await decryptFile(file, ui.pw.value);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(out.blob);
+      a.download = out.suggestedName;
+      a.click();
+      ui.status.innerHTML = '✅ Done: ' + out.suggestedName;
+    } catch (e) {
+      ui.status.innerHTML = '⚠️ ' + e.message;
+    } finally {
+      ui.go.disabled = false;
+    }
+  };
+})();
+</script>
+</body>
+</html>
